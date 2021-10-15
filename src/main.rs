@@ -1,13 +1,12 @@
-use std::{thread, time::{Duration, Instant}, io::{stdout, stdin, Read, Write}};
+use std::{thread, time::{Duration, Instant}, io::{stdout, stdin, Read, Write}, sync::{Mutex, Arc}};
 use crossterm::*;
 use owo_colors::{OwoColorize, AnsiColors, DynColors};
-// use rand::prelude::random;
 use num_derive::FromPrimitive;    
 use num_traits::FromPrimitive;
-use noise::*;
+// use noise::*;
+use bracket_noise::prelude::*;
 
-
-#[derive(FromPrimitive)]
+#[derive(FromPrimitive, Debug)]
 enum Keys {
     Enter = 13,
     Exit = 3,
@@ -18,117 +17,153 @@ enum Keys {
     Unknown = 0
 }
 
+const BRAILLE_TABLE: [&str; 13] = [" ", " ", "⠐", "⠐", "⠌", "⠌", "⠇", "⠇", "⠳", "⠳", "⠷", "⠷", "⠿"];
+const COLOR_TABLE: [AnsiColors; 10] = [
+    AnsiColors::Blue, 
+    AnsiColors::BrightBlue, 
+    AnsiColors::Green, 
+    AnsiColors::BrightGreen, 
+    AnsiColors::Yellow, 
+    AnsiColors::BrightYellow, 
+    AnsiColors::Red,
+    AnsiColors::BrightRed,
+    AnsiColors::Magenta,
+    AnsiColors::White];
+
+const MOVE_SPEED: f32 = 1.0;
+const PRINT_RANGE: bool = false;
+
+const SIZE_MUL: f32 = 1.0;
+const INTENSITY: f32 = 1.0;
+const UPPER_BOUND: f32 = 1.0;
+const LOWER_BOUND: f32 = -1.0;
+const NEW_UP: f32 = 12.0;
+const NEW_LOW: f32 = 0.0;
+
 fn main() {
-    let orig_size = terminal::size().unwrap();
+    let (w,h) = terminal::size().unwrap();
     terminal::enable_raw_mode().unwrap();
     execute!(
         stdout(), 
         terminal::EnterAlternateScreen, 
         cursor::MoveTo(0, 0));
 
-    let mut t = 0.0;
-    loop {
-    if let Ok((w, h)) = terminal::size() {
-        let tim_genS = Instant::now();
-        let perlin = Billow::new();
+    let noise_source = FastNoise::new();
+    let mut buffer: Vec<AnsiColors> = vec![AnsiColors::Black; ((w+1)*(h+1)) as usize];
 
-        const SIZE_MUL: f64 = 5.0;
-        const INTENSITY: f64 = 11.0;
-        const LOWER_BOUND: f64 = -0.86;
-        const UPPER_BOUND: f64 = 0.85;
-        const NEW_UP: f64 = 1.0;
-        const NEW_LOW: f64 = 0.05;
+    let keys_pressed: Vec<Keys> = Vec::new();
+    let keys_pressed_mutex = Mutex::new(keys_pressed);
+    let keys_pressed_arc = Arc::new(keys_pressed_mutex);
+
+    let mut offset = (0.0, 0.0);
+
+    {
+        let arc = keys_pressed_arc.clone();
+        // Input loop
+        thread::spawn(move || {
+            loop {
+                let mut input = [1];
+                stdin().read(&mut input).unwrap();
+
+                if let Some(key) = FromPrimitive::from_u8(input[0]) {
+                    let mut handle = arc.lock().unwrap();
+                    handle.push(key);
+                    // match key {
+                    //     Keys::Enter | Keys::Exit => handle.push(Keys::Enter),
+                    //     // Keys::Up =>    execute!(stdout(), cursor::MoveUp(1)).unwrap(),
+                    //     // Keys::Down =>  execute!(stdout(), cursor::MoveDown(1)).unwrap(),
+                    //     // Keys::Left =>  execute!(stdout(), cursor::MoveLeft(1)).unwrap(),
+                    //     // Keys::Right => execute!(stdout(), cursor::MoveRight(1)).unwrap(),
+                    //     Keys::Up =>    OFFSET.0 += 1.0 * MOVE_SPEED,
+                    //     Keys::Down =>  OFFSET.0 -= 1.0 * MOVE_SPEED,
+                    //     Keys::Left =>  OFFSET.1 += 1.0 * MOVE_SPEED,
+                    //     Keys::Right => OFFSET.1 -= 1.0 * MOVE_SPEED,
+                    //     _ => ()
+                    // }
+                }
+            }
+        });
+    }
+
+    'main: loop {
+        let handle = keys_pressed_arc.lock().unwrap();
+        for key in &*handle {
+            match key {
+                Keys::Enter | Keys::Exit => {
+                    exit((w,h));
+                    break 'main;
+                },
+                Keys::Up =>    offset.0 += 1.0 * MOVE_SPEED,
+                Keys::Down =>  offset.0 -= 1.0 * MOVE_SPEED,
+                Keys::Left =>  offset.1 += 1.0 * MOVE_SPEED,
+                Keys::Right => offset.1 -= 1.0 * MOVE_SPEED,
+                _ => ()
+            }
+        }
         
-        let mut ext = (9999.0, -9999.0);
-        let mut extN = (9999.0, -9999.0);
-        let mut buffer: Vec<AnsiColors> = Vec::new();
+        let timer_start = Instant::now();
+
+        let mut range_of_unmapped = (9999.0, -9999.0);
+        let mut range_of_mapped = (9999.0, -9999.0);
 
         for y in 0..h {
             for x in 0..w {
-                fn map(x: f64) -> f64 {
-                    return (x-LOWER_BOUND)*((NEW_UP-NEW_LOW)/(UPPER_BOUND-LOWER_BOUND))+NEW_LOW;
-                }
-                // let num = random::<u8>()/(255/6);
-                let uscp = perlin.get([(t + 2.0*x as f64) / w as f64 * SIZE_MUL, y as f64 / h as f64 * SIZE_MUL + t]);
-                if uscp > ext.1 { ext.1 = uscp; }
-                if uscp < ext.0 { ext.0 = uscp; }
-                // println!("{}", uscp);
-                // let perl = (uscp-(-1.0))/(1.0-(-1.0)) * ((1.0)-(0.0));
-                // let perl = uscp-(LOWER_BOUND)/(UPPER_BOUND-(LOWER_BOUND)) * (NEW_UP - NEW_LOW);
-                let perl = map(uscp);
-                if perl > extN.1 { extN.1 = perl; }
-                if perl < extN.0 { extN.0 = perl; }
-                let braille = match (perl * INTENSITY) as u8 {
-                    0 => " ",
-                    1 => " ",
-                    2 => "⠐",
-                    3 => "⠐",
-                    4 => "⠌",
-                    5 => "⠌",
-                    6 => "⠇",
-                    7 => "⠇",
-                    8 => "⠳",
-                    9 => "⠳",
-                    10 => "⠷",
-                    11 => "⠷",
-                    12 => "⠿",
-                    _ => " "
-                };
-                /*
-                    // println!("{}", perlin.get([(x as f64)/(w as f64), (y as f64)/(h as f64)]));
-                    // let num = perlin.get((x as f64)*(y as f64));
-                    // print!(" {} {}", x,y);
-                    // let color = match (perl * INTENSITY) as u8 {
-                    //     0 => DynColors::Ansi(AnsiColors::Black),
-                    //     1 => DynColors::Ansi(AnsiColors::Blue),
-                    //     2 => DynColors::Ansi(AnsiColors::BrightBlue),
-                    //     3 => DynColors::Ansi(AnsiColors::Green),
-                    //     4 => DynColors::Ansi(AnsiColors::BrightGreen),
-                    //     5 => DynColors::Ansi(AnsiColors::Yellow),
-                    //     6 => DynColors::Ansi(AnsiColors::BrightYellow),
-                    //     7 => DynColors::Ansi(AnsiColors::Red),
-                    //     8 => DynColors::Ansi(AnsiColors::BrightRed),
-                    //     9 => DynColors::Ansi(AnsiColors::Magenta),
-                    //     10 => DynColors::Ansi(AnsiColors::White),
-                    //     _ => DynColors::Ansi(AnsiColors::BrightWhite)
-                    // };
-                    // buffer[(w*h) as usize] = match (perl * INTENSITY) as u8 {
-                */
+                // let mut noise_value = noise_source.get([(t + 2.0*x as f64) / w as f64 * SIZE_MUL, y as f64 / h as f64 * SIZE_MUL + t]);
+                let mut noise_value = noise_source.get_noise(
+                    (x as f32) * SIZE_MUL + offset.0, 
+                    (y as f32) * SIZE_MUL + offset.1);
 
-                let col = match (perl * INTENSITY) as u8 {
-                    0 => AnsiColors::Black,
-                    1 => AnsiColors::Blue,
-                    2 => AnsiColors::BrightBlue,
-                    3 => AnsiColors::Green,
-                    4 => AnsiColors::BrightGreen,
-                    5 => AnsiColors::Yellow,
-                    6 => AnsiColors::BrightYellow,
-                    7 => AnsiColors::Red,
-                    8 => AnsiColors::BrightRed,
-                    9 => AnsiColors::Magenta,
-                    10 => AnsiColors::White,
+                if noise_value > range_of_unmapped.1 { range_of_unmapped.1 = noise_value; }
+                if noise_value < range_of_unmapped.0 { range_of_unmapped.0 = noise_value; }
+
+                map(&mut noise_value);
+
+                if noise_value > range_of_mapped.1 { range_of_mapped.1 = noise_value; }
+                if noise_value < range_of_mapped.0 { range_of_mapped.0 = noise_value; }
+
+                let braille = match (noise_value * INTENSITY) as u8 {
+                    i if i < BRAILLE_TABLE.len() as u8 => BRAILLE_TABLE[i as usize],
+                    _ => "⠿"
+                };
+                
+                let col = match (noise_value * INTENSITY) as u8 {
+                    i if i < COLOR_TABLE.len() as u8 => COLOR_TABLE[i as usize],
                     _ => AnsiColors::BrightWhite
                 };
-                buffer.push(col);
-                // print!("{}", " ".on_color(color));
+
+                buffer[((x+1)*(y+1)) as usize] = col;
+                // println!("{}", (x+1)*(y+1));
+                // assert_eq!(buffer[(x*y) as usize], col);
+                assert_eq!(offset.0, 0.0);
             }
         }
-		
-		let beforePrint = tim_genS.elapsed().as_millis();
+        
+        let beforePrint = timer_start.elapsed().as_millis();
 
         let mut end_string = String::new();
-        for color in buffer {
-            end_string.push_str(&format!("{}", " ".on_color(DynColors::Ansi(color))));
+        for i in (1 as usize)..buffer.len() {
+            end_string.push_str(&format!("{}", " ".on_color(DynColors::Ansi(buffer[i]))));
+            // print!("{}", " ".on_color(DynColors::Ansi(*color)));
         }
 
-		execute!(
+        print!("{}", end_string);
+        // println!("{}", timer_start.elapsed().as_millis() - beforePrint);
+
+        execute!(
             stdout(), 
             cursor::MoveTo(0,0));
 
-		print!("{}", end_string);
-        sleep(200);
-		t += 1.0;
-     }
+        if PRINT_RANGE == true {
+            println!("{:?}", range_of_unmapped);
+            println!("{:?}", range_of_mapped);
+        }
+        
+        sleep(2000);
+        execute!(
+            stdout(),
+            // terminal::Clear(terminal::ClearType::All),
+            cursor::MoveTo(0, 0)
+        );
     }
 
     execute!(
@@ -136,31 +171,23 @@ fn main() {
         cursor::SetCursorShape(cursor::CursorShape::Block),
         cursor::MoveTo(0, 0)
     );
+}
 
-    // Input loop
-    loop {
-        let mut input = [1];
-        stdin().read(&mut input).unwrap();
-        if let Some(key) = FromPrimitive::from_u8(input[0]) {
-            match key {
-                Keys::Enter | Keys::Exit => break,
-                Keys::Up =>    execute!(stdout(), cursor::MoveUp(1)).unwrap(),
-                Keys::Down =>  execute!(stdout(), cursor::MoveDown(1)).unwrap(),
-                Keys::Left =>  execute!(stdout(), cursor::MoveLeft(1)).unwrap(),
-                Keys::Right => execute!(stdout(), cursor::MoveRight(1)).unwrap(),
-                _ => ()
-            }
-        }
-    }
+fn exit(orig_size: (u16, u16)) {
     terminal::disable_raw_mode().unwrap();
-    execute!(
-        stdout(), 
-        terminal::SetSize(orig_size.0, orig_size.1),
-        terminal::LeaveAlternateScreen,
-        terminal::Clear(terminal::ClearType::All)); 
+        execute!(
+            stdout(), 
+            terminal::SetSize(orig_size.0, orig_size.1),
+            terminal::LeaveAlternateScreen,
+            terminal::Clear(terminal::ClearType::All));
 }
 
 fn sleep(millis: u64) {
     stdout().flush().unwrap();
     thread::sleep(Duration::from_millis(millis));
+}
+
+// fn map(x: &mut f64) {
+fn map(x: &mut f32) {
+    *x = (*x-LOWER_BOUND)*((NEW_UP-NEW_LOW)/(UPPER_BOUND-LOWER_BOUND))+NEW_LOW;
 }
